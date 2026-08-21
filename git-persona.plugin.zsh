@@ -39,7 +39,7 @@
 #  Both are reset on every source, so re-sourcing ~/.zshrc redefines the
 #  profiles rather than appending a second copy of each.
 # -----------------------------------------------------------------------------
-typeset -g GIT_ID_VERSION='1.0.1'
+typeset -g GIT_ID_VERSION='1.0.2'
 
 typeset -gA GIT_ID_FIELD=()
 typeset -ga GIT_ID_ORDER=()

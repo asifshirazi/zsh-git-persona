@@ -74,6 +74,15 @@ source /path/to/zsh-git-persona/git-persona.plugin.zsh
 
 Then `source ~/.zshrc` (or `exec zsh`) and run `git-add`.
 
+**Updating**
+
+```zsh
+git -C $ZSH_CUSTOM/plugins/git-persona pull && exec zsh
+```
+
+Pull rather than clone again. Cloning over an existing install fails with
+`destination path already exists`.
+
 ### Quick start
 
 A persona is built around an SSH key, so you need one per account in `~/.ssh`
@@ -215,6 +224,11 @@ which account is live next to the key.
 **Boxes instead of icons.** No Nerd Font. Run `git-id-icons`: a blank between
 brackets means the font has no glyph there. Nothing but the icons is affected.
 
+**`fatal: destination path ... already exists and is not an empty directory`.**
+The plugin is already installed. To update it, `git -C
+$ZSH_CUSTOM/plugins/git-persona pull`. To reinstall from scratch, remove the
+directory first with `rm -rf $ZSH_CUSTOM/plugins/git-persona`.
+
 **`git-add` shows no keys to pick from.** There are no private keys in `~/.ssh`.
 Keys are found by content rather than by filename, so anything without a
 `PRIVATE KEY` header is skipped. Generate one with `ssh-keygen`, as under
@@ -237,15 +251,19 @@ personas fall back to a neutral colour and work normally. Set `accent` and
 ## Uninstalling
 
 ```zsh
-omz plugin disable git-persona && rm -rf $ZSH_CUSTOM/plugins/git-persona
+omz plugin disable git-persona; rm -rf $ZSH_CUSTOM/plugins/git-persona
 ```
+
+A semicolon, not `&&`. `omz plugin disable` exits non-zero when the plugin is
+not currently enabled, which would otherwise skip the removal and leave the
+directory in place to break your next install.
 
 Your personas stay in `~/.config/git-persona/`, and the last identity a switch
 wrote stays in `~/.gitconfig`. Delete both by hand if you want them gone.
 
 ## Changelog
 
-Every release is listed in [CHANGELOG.md](CHANGELOG.md). Current version 1.0.1,
+Every release is listed in [CHANGELOG.md](CHANGELOG.md). Current version 1.0.2,
 which `git-who` and the plugin report as `$GIT_ID_VERSION` if you need it for a
 bug report.
 

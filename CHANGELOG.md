@@ -5,6 +5,22 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-08-21
+
+### Fixed
+
+- **The uninstall command left the plugin directory behind.** `omz plugin
+  disable` exits non-zero when the plugin is not currently enabled, so the `&&`
+  skipped the removal. Reinstalling then failed with `destination path already
+  exists and is not an empty directory`. It now uses a semicolon, so the removal
+  runs whether or not the plugin was enabled.
+
+### Documentation
+
+- Documented how to update an existing install with `git pull`, and added a
+  troubleshooting entry for the `destination path already exists` error that
+  cloning over one produces.
+
 ## [1.0.1] - 2026-08-21
 
 Documentation only. No change to how the plugin behaves.
@@ -66,5 +82,6 @@ First public release.
   themselves off rather than failing: copying the device code to the clipboard,
   and preserving the `~/.ssh/config` file mode.
 
+[1.0.2]: https://github.com/asifshirazi/zsh-git-persona/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/asifshirazi/zsh-git-persona/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/asifshirazi/zsh-git-persona/releases/tag/v1.0.0
