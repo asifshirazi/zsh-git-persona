@@ -1,0 +1,9 @@
+# Never commit account data. profiles.zsh holds real names, emails and GitHub
+# usernames; it belongs in ~/.config/git-persona, never in this repo.
+profiles.zsh
+
+# Backups written by git-add, git-remove and the ssh-config helpers.
+*.bak
+*.tmp.*
+
+.DS_Store
