@@ -20,6 +20,7 @@ many as you have accounts.
 - [Requirements](#requirements)
 - [Troubleshooting](#troubleshooting)
 - [Uninstalling](#uninstalling)
+- [Changelog](#changelog)
 - [Licence](#licence)
 
 ## Why
@@ -42,7 +43,7 @@ something is out of step.
 **oh-my-zsh**, clone, enable and reload in one go:
 
 ```zsh
-git clone --depth=1 https://github.com/asifshirazi/zsh-git-persona.git "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/git-persona" && omz plugin enable git-persona && exec zsh
+git clone https://github.com/asifshirazi/zsh-git-persona.git $ZSH_CUSTOM/plugins/git-persona && omz plugin enable git-persona && exec zsh
 ```
 
 `omz` is oh-my-zsh's own CLI, so it edits `plugins=(...)` correctly whether yours
@@ -75,11 +76,20 @@ Then `source ~/.zshrc` (or `exec zsh`) and run `git-add`.
 
 ### Quick start
 
+A persona is built around an SSH key, so you need one per account in `~/.ssh`
+before `git-add` has anything to offer. If you already have them, skip the first
+line.
+
 ```zsh
+ssh-keygen -t ed25519 -C "you@example.com" -f ~/.ssh/id_ed25519_work
 git-add          # add your first persona, once per account
 git-switch       # pick one, any time
 git-who          # check which one is live
 ```
+
+The `-C` comment is where the commit email comes from. Add the matching `.pub`
+to that account under [Settings > SSH keys](https://github.com/settings/keys),
+and see [Requirements](#requirements) for the detail.
 
 ## Commands
 
@@ -96,7 +106,8 @@ git-who          # check which one is live
 
 ### Adding a persona
 
-`git-add` asks three things. Everything else it works out for itself:
+`git-add` lists the private keys in `~/.ssh` and asks three things. Everything
+else it works out for itself:
 
 ```text
    keys in ~/.ssh  up/down, enter to pick
@@ -166,6 +177,16 @@ Set any of these in `~/.zshrc` **before** the plugin loads.
 ## Requirements
 
 - zsh, git, and the [GitHub CLI](https://cli.github.com) (`gh`)
+- **An SSH key per account, in `~/.ssh`, each with its `.pub` beside it.** A
+  persona is built around a key, so `git-add` has nothing to offer without one.
+  The `.pub` is what the commit email is read from. Create one per account with:
+
+  ```zsh
+  ssh-keygen -t ed25519 -C "you@example.com" -f ~/.ssh/id_ed25519_work
+  ```
+
+  Then add the public half to that GitHub account under
+  [Settings > SSH keys](https://github.com/settings/keys).
 - A [Nerd Font](https://www.nerdfonts.com) is **optional**. Without one you get
   ASCII markers instead of icons and the layout is unaffected. Run
   `git-id-icons` to check. Outside a UTF-8 locale it falls back automatically.
@@ -194,6 +215,17 @@ which account is live next to the key.
 **Boxes instead of icons.** No Nerd Font. Run `git-id-icons`: a blank between
 brackets means the font has no glyph there. Nothing but the icons is affected.
 
+**`git-add` shows no keys to pick from.** There are no private keys in `~/.ssh`.
+Keys are found by content rather than by filename, so anything without a
+`PRIVATE KEY` header is skipped. Generate one with `ssh-keygen`, as under
+[Requirements](#requirements), then run `git-add` again. You can also type a
+path at the prompt if your key lives elsewhere.
+
+**It asked for the email instead of reading it.** The key has no `.pub` beside
+it, or that file's comment is a hostname rather than an address, which is what
+`ssh-keygen` writes when given no `-C`. Type the email and carry on, or
+regenerate the public half with `ssh-keygen -y -f <key> > <key>.pub`.
+
 **Edited the persona file by hand and nothing changed.** Run `source ~/.zshrc`.
 Additions and removals are both picked up: a new block gets its `git-<persona>`
 command, and a deleted one has its command removed.
@@ -205,11 +237,17 @@ personas fall back to a neutral colour and work normally. Set `accent` and
 ## Uninstalling
 
 ```zsh
-omz plugin disable git-persona && rm -rf "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/git-persona"
+omz plugin disable git-persona && rm -rf $ZSH_CUSTOM/plugins/git-persona
 ```
 
 Your personas stay in `~/.config/git-persona/`, and the last identity a switch
 wrote stays in `~/.gitconfig`. Delete both by hand if you want them gone.
+
+## Changelog
+
+Every release is listed in [CHANGELOG.md](CHANGELOG.md). Current version 1.0.1,
+which `git-who` and the plugin report as `$GIT_ID_VERSION` if you need it for a
+bug report.
 
 ## Licence
 
