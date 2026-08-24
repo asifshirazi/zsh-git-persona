@@ -39,7 +39,7 @@
 #  Both are reset on every source, so re-sourcing ~/.zshrc redefines the
 #  profiles rather than appending a second copy of each.
 # -----------------------------------------------------------------------------
-typeset -g GIT_ID_VERSION='1.0.2'
+typeset -g GIT_ID_VERSION='1.1.2'
 
 typeset -gA GIT_ID_FIELD=()
 typeset -ga GIT_ID_ORDER=()
@@ -482,8 +482,40 @@ _gid_probe() {
 # instead. A parse miss returns empty, which every caller treats as unknown
 # rather than as an error, so a gh output change degrades the display and never
 # blocks a switch.
+# gh's own account list, which is a local file. Worth reading directly:
+# `gh auth status` validates every token it holds over the network, which costs
+# about a second per account and made a switch take five. Nothing here needs a
+# token proved good, only the names gh knows and which one is active, and both
+# are answered offline.
+#
+# Falls back to gh whenever the file cannot answer, so a layout change upstream
+# degrades to the old speed rather than to a wrong answer.
+_gid_gh_hosts() {
+  print -r -- "${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/hosts.yml"
+}
+
+# gh ignores hosts.yml entirely when a token comes from the environment, so the
+# file is not authoritative then and the slow path is the correct one.
+_gid_gh_env_token() {
+  [[ -n ${GH_TOKEN:-${GITHUB_TOKEN:-}} ]]
+}
+
+# The active account, from the `user:` key of the github.com block. Indentation
+# is matched exactly as gh writes it, so an account named "user" nested under
+# `users:` cannot be mistaken for the key.
 _gid_gh_active() {
   command -v gh &>/dev/null || return 1
+
+  local f=$(_gid_gh_hosts) out=''
+  if ! _gid_gh_env_token && [[ -r $f ]]; then
+    out=$(awk '
+      /^github\.com:/       { inhost = 1; next }
+      /^[^[:space:]]/       { inhost = 0 }
+      inhost && /^    user:/ { sub(/^    user:[[:space:]]*/, ""); print; exit }
+    ' $f 2>/dev/null)
+    [[ -n $out ]] && { print -r -- $out; return }
+  fi
+
   local line=$(gh auth status --active --hostname github.com 2>/dev/null \
                | grep -m1 'Logged in to')
   [[ $line =~ 'account ([^[:space:]]+)' ]] && print -r -- $match[1]
@@ -491,6 +523,17 @@ _gid_gh_active() {
 
 # True when $1 is one of the accounts gh already holds a token for.
 _gid_gh_known() {
+  local f=$(_gid_gh_hosts)
+  if ! _gid_gh_env_token && [[ -r $f ]]; then
+    local -a users=( ${(f)"$(awk '
+      /^github\.com:/          { inhost = 1; next }
+      /^[^[:space:]]/          { inhost = 0; inusers = 0 }
+      inhost && /^    users:/  { inusers = 1; next }
+      inusers && /^    [^ ]/   { inusers = 0 }
+      inusers && /^        [^ ]+:/ { sub(/:.*$/, ""); gsub(/ /, ""); print }
+    ' $f 2>/dev/null)"} )
+    (( ${#users} )) && { (( ${users[(Ie)$1]} )); return }
+  fi
   gh auth status 2>&1 | grep -q "account ${1} "
 }
 
@@ -628,6 +671,137 @@ _gid_gh_login() {
   # wrong one was picked, say so rather than reporting a success that would
   # leave the next push on someone else's token.
   _gid_gh_known $want
+}
+
+# -----------------------------------------------------------------------------
+#  HTTPS credentials
+#
+#  Switching gh only governs https traffic if git actually asks gh for the
+#  password. It does not by default. Git accumulates credential helpers from
+#  every scope, and on macOS /etc/gitconfig ships `helper = osxkeychain`, which
+#  answers first and hands back whichever token it cached on the very first
+#  push. That token belongs to one account for ever, so every persona would
+#  clone and push as that account no matter what gh says.
+#
+#  `gh auth setup-git` is what fixes it: it writes an empty helper (which
+#  clears everything inherited, osxkeychain included) followed by gh's own.
+#  gh runs it during `gh auth login` only when https is chosen as the preferred
+#  protocol, so a machine set up over ssh silently lacks it.
+# -----------------------------------------------------------------------------
+
+# The helper git would really use for github.com, after the whole
+# system/global/local chain has been resolved. --get-urlmatch is the only way
+# to ask; reading credential.helper directly misses the per-host sections.
+_gid_cred_helper() {
+  git config --get-urlmatch credential.helper https://github.com 2>/dev/null
+}
+
+# True when that helper is gh. Matched on the word, not on a path, because
+# setup-git writes an absolute one that differs per platform: /opt/homebrew on
+# apple silicon, /usr/local on intel, /usr/bin on linux.
+_gid_cred_ok() {
+  [[ $(_gid_cred_helper) == *gh*auth*git-credential* ]]
+}
+
+# Idempotent, and cheap enough to call on any path that already has gh in hand.
+# Returns non-zero without touching anything when gh is absent, so callers can
+# report rather than assume.
+_gid_cred_setup() {
+  command -v gh &>/dev/null || return 1
+  gh auth setup-git 2>/dev/null
+  _gid_cred_ok
+}
+
+# -----------------------------------------------------------------------------
+#  Re-authoring commits that have not been pushed
+#
+#  Committing under one persona and pushing under another is the exact failure
+#  this plugin exists to prevent, and switching in between is the one route
+#  still open. So a switch offers to correct the commits that are still local.
+#
+#  Strictly limited to commits reachable from HEAD but from no remote branch.
+#  Those have never left the machine, so rewriting them needs no force push and
+#  breaks nobody's clone. Anything already pushed is left alone: correcting it
+#  means rewriting shared history, which is a decision for a person, not for a
+#  side effect of switching personas.
+# -----------------------------------------------------------------------------
+
+# Commits on HEAD that no remote knows about, oldest last.
+_gid_pending() {
+  git rev-list HEAD --not --remotes 2>/dev/null
+}
+
+# The author emails of those commits that belong to some other persona of
+# yours. A cherry-pick or a mailed patch from a colleague is authored by
+# someone with no persona here, and must never be reattributed to you.
+_gid_pending_foreign() {
+  local target=$1 p='' e='' seen=''
+  local -a mine=() found=()
+  for p in $GIT_ID_ORDER; do mine+=( $(_gid_f $p email) ); done
+
+  for e in ${(f)"$(git log --format='%ae' HEAD --not --remotes 2>/dev/null)"}; do
+    [[ $e == $target ]] && continue                 # already correct
+    (( ${mine[(Ie)$e]} )) || continue               # not one of yours, leave it
+    [[ $seen == *"|$e|"* ]] && continue             # dedupe
+    seen="${seen}|${e}|"
+    found+=( $e )
+  done
+  print -rl -- $found
+}
+
+# Rewrite the pending commits authored by $2.. to "$name <$email>".
+# Returns non-zero and explains itself rather than leaving a half-done rebase.
+_gid_reauthor() {
+  local name=$1 email=$2; shift 2
+  local -a old=( $@ )
+  (( ${#old} )) || return 0
+
+  # A rebase cannot start from a dirty tree, and finding that out halfway
+  # through is worse than refusing now.
+  if ! git diff --quiet || ! git diff --cached --quiet; then
+    print -u2 '   uncommitted changes, commit or stash them first'
+    return 1
+  fi
+  local gd=$(git rev-parse --git-dir)
+  if [[ -d $gd/rebase-merge || -d $gd/rebase-apply ]]; then
+    print -u2 '   a rebase is already in progress'
+    return 1
+  fi
+  if [[ -z $(git symbolic-ref -q HEAD) ]]; then
+    print -u2 '   detached HEAD, checkout a branch first'
+    return 1
+  fi
+  # Replaying a merge rewrites its parents too, which can quietly drop a side
+  # of the history. Not worth the risk for a convenience.
+  if [[ -n $(git rev-list --merges HEAD --not --remotes 2>/dev/null) ]]; then
+    print -u2 '   pending commits include a merge, re-author by hand'
+    return 1
+  fi
+
+  local -a pending=( ${(f)"$(_gid_pending)"} )
+  (( ${#pending} )) || return 0
+
+  # Oldest pending commit's parent is where the replay starts. A repository
+  # whose very first commit is still unpushed has no such parent, hence --root.
+  local base=$(git rev-parse --verify -q "${pending[-1]}^" 2>/dev/null)
+  local -a from=( ${base:---root} )
+
+  # Passed through the environment rather than interpolated into the --exec
+  # string, so an apostrophe in a name cannot end up as shell syntax. The exec
+  # runs under sh, so grep does the matching: -F fixed, -x whole line, one
+  # pattern per line.
+  local ex='if git log -1 --format=%ae | grep -qxF "$GIT_PERSONA_OLD"; then'
+  # --allow-empty because amending a commit that carries no changes is refused
+ # otherwise, and an empty commit is a perfectly ordinary thing to have made.
+ ex+=' git commit --amend --no-edit --allow-empty --author="$GIT_PERSONA_NEW"; fi'
+
+  GIT_PERSONA_OLD=${(F)old} GIT_PERSONA_NEW="${name} <${email}>" \
+    git -c advice.detachedHead=false rebase --empty=keep $from --exec $ex >/dev/null 2>&1 || {
+      git rebase --abort 2>/dev/null
+      print -u2 '   could not replay the commits, nothing was changed'
+      return 1
+    }
+  return 0
 }
 
 # Point gh at the account behind profile $1. Sets _gid_gh in the caller to
@@ -874,7 +1048,13 @@ _gid_switch() {
   # a bare directory, which the old per-repo write could not do.
   git config --global user.name       "$name"
   git config --global user.email      "$email"
-  git config --global core.sshCommand "ssh -i ${key/#\~/$HOME}"
+  #
+  # IdentitiesOnly=yes is not optional. -i only *adds* a key to the list ssh
+  # offers; ssh-agent's keys are still offered first, and github accepts the
+  # first one that matches any account, so with several keys in the agent the
+  # persona would be decided by agent order rather than by this line. The flag
+  # goes after -i, which git-who's parser relies on.
+  git config --global core.sshCommand "ssh -i ${key/#\~/$HOME} -o IdentitiesOnly=yes"
 
   # The env var beats core.sshCommand, and being per-shell it is the one thing
   # that could answer differently in two tabs. Clearing it lets the global
@@ -882,6 +1062,37 @@ _gid_switch() {
   unset GIT_SSH_COMMAND
 
   _gid_gh_switch "$profile"
+
+  # Switching gh is only half of https auth. If git is not asking gh for the
+  # password, the account above governs nothing over https and the push goes
+  # out on a stale cached token instead.
+  if command -v gh &>/dev/null && ! _gid_cred_ok; then
+    _gid_notes+=(
+      'https auth does not go through gh, so clone and push ignore this account. run: gh auth setup-git'
+    )
+  fi
+
+  # Commits made under the previous persona that have not left the machine yet.
+  # Offered, never silent: rewriting commits changes their hashes, and doing
+  # that as an unannounced side effect of a switch would be indefensible even
+  # when it is safe. Only asked when there is something to fix.
+  if _gid_probe && [[ -o interactive && -t 0 ]]; then
+    local -a _gid_bad=( ${(f)"$(_gid_pending_foreign $email)"} )
+    if (( ${#_gid_bad} )); then
+      local -i _gid_n=$(git rev-list --count HEAD --not --remotes 2>/dev/null)
+      print
+      print -r -- "   ${_gid_n} unpushed commit$( (( _gid_n == 1 )) || print -n s ) authored as ${_gid_bad}"
+      if read -q "REPLY?   re-author to ${name} <${email}>? [y/N] "; then
+        print
+        if _gid_reauthor "$name" "$email" $_gid_bad; then
+          _gid_notes+=( "re-authored ${_gid_n} unpushed commit$( (( _gid_n == 1 )) || print -n s ) as ${email}" )
+        fi
+      else
+        print
+        _gid_notes+=( "${_gid_n} unpushed commit$( (( _gid_n == 1 )) || print -n s ) still authored as ${_gid_bad}" )
+      fi
+    fi
+  fi
 
   # Local config beats global, so a repo carrying its own user.email would
   # quietly ignore everything set above and keep committing as the old
@@ -1239,6 +1450,107 @@ _gid_next_colours() {
   print -r -- "$GIT_ID_NEUTRAL $GIT_ID_SHADOW"
 }
 
+# Opener for the desktop browser, or nothing when there is no desktop to open
+# on: a headless box gets the url printed instead.
+_gid_open_cmd() {
+  local c=''
+  for c in open xdg-open wslview; do
+    command -v $c &>/dev/null && { print -r -- $c; return }
+  done
+  return 1
+}
+
+# Generate a key, then hand the public half to github.
+#
+# Offered from git-add's key list because a persona is built around a key, and
+# somebody adding their second account usually has to make one first. Doing it
+# here rather than sending them away means the comment is set to the commit
+# email, which is what git-add reads back, so the address is typed once.
+#
+# Prints the chosen path on stdout. Everything else goes to stderr so the
+# caller can capture it.
+_gid_keygen() {
+  local X=$'\e[0m' DIM=$'\e[38;5;243m' HI=$'\e[1;38;5;255m'
+  local OK=$'\e[38;5;108m' WARN=$'\e[38;5;179m'
+  # Never `path`: zsh ties that name to PATH, so a local one empties the
+  # command search path for the rest of the function.
+  local email='' name='' keyfile=''
+
+  {
+    print
+    print -r -- "   ${HI}Generate an ssh key${X}"
+    print -r -- "   ${DIM}an ed25519 key pair. the private half stays in ~/.ssh,${X}"
+    print -r -- "   ${DIM}the public half goes to github. the comment becomes${X}"
+    print -r -- "   ${DIM}the email on your commits, so use the account's address.${X}"
+    print -r -- "   ${DIM}a passphrase is optional, press enter twice to skip it.${X}"
+    print
+  } >&2
+
+  while true; do
+    _gid_ask 'email for this account' '' >&2
+    email=$REPLY
+    [[ $email =~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$' ]] && break
+    print -r -- "   ${WARN}that does not look like an email address${X}" >&2
+  done
+
+  # Defaulted from the address so the file says which account it belongs to,
+  # which is the thing people misremember when picking from the list later.
+  local suggest="id_ed25519_${${(L)email%%@*}//[^a-z0-9]/}"
+  while true; do
+    _gid_ask 'file name in ~/.ssh' "$suggest" >&2
+    name=${REPLY:t}                       # a path here would be confusing
+    keyfile=$HOME/.ssh/$name
+    if [[ -z $name ]]; then
+      print -r -- "   ${WARN}a name is required${X}" >&2
+    elif [[ -e $keyfile || -e $keyfile.pub ]]; then
+      # Overwriting a private key destroys access to everything it opens, and
+      # ssh-keygen's own prompt is easy to answer wrongly in a hurry.
+      print -r -- "   ${WARN}${name} already exists in ~/.ssh${X}" >&2
+    else
+      break
+    fi
+  done
+
+  [[ -d ~/.ssh ]] || { mkdir -p ~/.ssh && chmod 700 ~/.ssh } || {
+    print -r -- "   ${WARN}could not create ~/.ssh${X}" >&2; return 1
+  }
+
+  print >&2
+  ssh-keygen -t ed25519 -C "$email" -f "$keyfile" >&2 || {
+    print -r -- "   ${WARN}ssh-keygen failed, nothing was written${X}" >&2
+    return 1
+  }
+  print >&2
+  print -r -- "   ${OK}created${X}  ${HI}~/.ssh/${name}${X}" >&2
+
+  # ---- hand the public half over ---------------------------------------------
+  local pubtext=$(<$keyfile.pub)
+  local clip=$(_gid_clip_cmd)
+  if [[ -n $clip ]]; then
+    print -rn -- "$pubtext" | ${=clip} 2>/dev/null \
+      && print -r -- "   ${OK}public key copied to your clipboard${X}" >&2
+  fi
+
+  local url='https://github.com/settings/ssh/new'
+  local opener=$(_gid_open_cmd)
+  if [[ -n $opener ]]; then
+    print -r -- "   ${DIM}opening ${url}${X}" >&2
+    $opener $url >/dev/null 2>&1
+  else
+    print -r -- "   ${DIM}add it at ${url}${X}" >&2
+  fi
+
+  # Printed as well as copied: a clipboard can be clobbered between here and
+  # the browser, and this is the one thing that cannot be recovered by guessing.
+  print >&2
+  print -r -- "   ${DIM}${pubtext}${X}" >&2
+  print >&2
+  read -r "?   press enter once the key is added on github " >&2
+  print >&2
+
+  print -r -- "~/.ssh/${name}"
+}
+
 # -----------------------------------------------------------------------------
 #  git-add  ·  add an account
 # -----------------------------------------------------------------------------
@@ -1285,29 +1597,48 @@ git-add() {
   local -a keylines=()
   local kidx=''
 
+  # An extra entry rather than a separate question. Somebody adding their
+  # second account usually has to make its key first, and sending them off to
+  # ssh-keygen and back loses the thread of what they were doing.
+  local -i newidx=$(( ${#keys} + 1 ))
+  local newlabel='generate a new key'
+
   if (( ${#keys} )); then
     print -r -- "   ${DIM}keys in ~/.ssh${X}  ${DIM}up/down, enter to pick${X}"
     print
     for (( i = 1; i <= ${#keys}; i++ )); do keylines+=( "${keys[i]:t}" ); done
+    keylines+=( "+ ${newlabel}" )
 
     if kidx=$(_gid_choose keylines 1); then
       # The picker ran. An empty answer is a deliberate cancel, not a fallback.
       [[ -n $kidx ]] || { print; print -r -- "   ${DIM}cancelled${X}"; print; return 1 }
-      key="~/.ssh/${keys[$kidx]:t}"
-      print
+      if (( kidx == newidx )); then
+        key=$(_gid_keygen) || return 1
+      else
+        key="~/.ssh/${keys[$kidx]:t}"
+        print
+      fi
     else
       # No tty, or arrows turned off: the numbered list still works, and a
       # path can be typed for a key living outside ~/.ssh.
       for (( i = 1; i <= ${#keys}; i++ )); do
         print -r -- "     ${HI}${i}.${X} ${keys[i]:t}"
       done
+      print -r -- "     ${HI}${newidx}.${X} ${newlabel}"
       print
     fi
+  else
+    # Nothing to choose from. Offering a prompt for a path that does not exist
+    # yet would be a dead end, so go straight to making one.
+    print -r -- "   ${DIM}no ssh keys found in ~/.ssh${X}"
+    key=$(_gid_keygen) || return 1
   fi
 
   if [[ -z $key ]]; then
-    _gid_ask 'ssh key, by number or path' "${keys[1]:t}"
-    if [[ $REPLY == <-> ]] && (( REPLY >= 1 && REPLY <= ${#keys} )); then
+    _gid_ask "ssh key, by number or path" "${keys[1]:t}"
+    if [[ $REPLY == <-> ]] && (( REPLY == newidx )); then
+      key=$(_gid_keygen) || return 1
+    elif [[ $REPLY == <-> ]] && (( REPLY >= 1 && REPLY <= ${#keys} )); then
       key="~/.ssh/${keys[$REPLY]:t}"
     elif [[ $REPLY == /* || $REPLY == '~'* ]]; then
       key=$REPLY
@@ -1396,6 +1727,19 @@ git-add() {
       print
       print -r -- "   ${WARN}sign-in did not complete${X}"
       _gid_ask 'github username for push, pull and clone' ''; gh=$REPLY
+    fi
+  fi
+
+  # ---- route https through gh ------------------------------------------------
+  # Done here rather than on every switch, because it is a one-time property of
+  # the machine, not of the persona. Without it `gh auth switch` moves the
+  # active account but git never asks gh for a password, so every persona
+  # clones and pushes on whatever token the system keychain cached first.
+  if command -v gh &>/dev/null && ! _gid_cred_ok; then
+    if _gid_cred_setup; then
+      print -r -- "   ${OK}https auth${X}  ${DIM}routed through gh${X}"
+    else
+      print -r -- "   ${WARN}could not route https auth through gh. run: gh auth setup-git${X}"
     fi
   fi
 
@@ -1704,6 +2048,14 @@ git-who() {
     scope='overridden on this repo'
     _gid_notes+=(
       'this repo sets its own user.email, so it ignores the global identity. run: git-id-locals --clear'
+    )
+  fi
+
+  # The same check the switch makes, repeated here because git-who is where
+  # someone looks when a clone came back with the wrong account's access.
+  if command -v gh &>/dev/null && ! _gid_cred_ok; then
+    _gid_notes+=(
+      "https auth uses ${${$(_gid_cred_helper):-no helper}##*/}, not gh, so clone and push ignore the account above. run: gh auth setup-git"
     )
   fi
 

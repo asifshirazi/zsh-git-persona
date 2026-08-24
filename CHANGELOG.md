@@ -5,6 +5,90 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-08-24
+
+### Changed
+
+- **Switching is about 30x faster**, from roughly 5.8s to 0.2s. Reading gh's
+  active account and its list of known accounts both went through
+  `gh auth status`, which validates every token it holds over the network: about
+  1.2s for the active account, and 4.4s for all three. Neither answer needs a
+  token proved good, and both are in `~/.config/gh/hosts.yml`, so they are now
+  read from there. `git-who` drops from about 1.3s to 0.06s for the same reason.
+
+  Falls back to `gh auth status` whenever the file cannot answer — missing,
+  unreadable, unparseable, or a token supplied through `GH_TOKEN` /
+  `GITHUB_TOKEN`, which gh honours over the file. A layout change upstream costs
+  the speed, never correctness.
+
+### Added
+
+- **`git-add` can generate the ssh key for you.** The key list now ends with
+  `+ generate a new key`, and a run with no keys at all goes straight there
+  instead of prompting for the path of a file that does not exist. It explains
+  what it is about to do in four lines, makes an ed25519 pair with the account's
+  address as the comment, copies the public half to your clipboard, and opens
+  <https://github.com/settings/ssh/new> so it can be pasted in. The public key
+  is printed as well, in case the clipboard is clobbered on the way to the
+  browser.
+
+  Because the comment is set to the address you gave, the email step that
+  follows reads it back rather than asking again. Existing files are never
+  overwritten, and `ssh-keygen` prompts for the passphrase itself.
+
+- **Switching offers to re-author the commits you have not pushed yet.** Making
+  a commit under one persona and then switching before pushing was the one route
+  left to the mismatch this plugin exists to prevent, because `git commit` never
+  checks permissions and by push time both halves agree again. A switch now
+  notices and asks:
+
+  ```text
+     2 unpushed commits authored as old@example.com
+     re-author to New Name <new@example.com>? [y/N]
+  ```
+
+  Deliberately narrow, and never silent:
+
+  - Only commits reachable from `HEAD` but from no remote branch. Those have
+    never left the machine, so nothing needs a force push and no clone breaks.
+    Anything already pushed is shared history and is left alone.
+  - Only commits authored by another of *your* personas. A cherry-pick or a
+    mailed patch from a colleague keeps its author.
+  - Refuses, without changing anything, on a dirty tree, a detached `HEAD`, a
+    rebase already in progress, or a merge among the pending commits.
+  - Asked, never assumed. Rewriting commits changes their hashes, which is not
+    something a config switch should do behind your back. Declining leaves a
+    note in the readout so it is not forgotten.
+
+## [1.0.3] - 2026-08-24
+
+### Fixed
+
+- **A persona could clone and push to repositories its account had no access
+  to.** Switching personas moved `gh`'s active account, but nothing made git
+  ask `gh` for the password. Git collects credential helpers from every config
+  scope, and on macOS `/etc/gitconfig` ships `helper = osxkeychain`, which
+  answers first with whichever token it cached on the first push. That token is
+  bound to one account permanently, so over HTTPS every persona authenticated
+  as that one account regardless of which was selected. `git-add` now runs `gh
+  auth setup-git`, and both `git-who` and every switch warn when HTTPS auth is
+  not routed through `gh`.
+
+  Machines where `gh auth login` was completed with HTTPS as the preferred
+  protocol were already configured correctly and never saw this; those set up
+  over SSH were affected.
+
+- **The wrong SSH key could be used when ssh-agent held more than one.**
+  `core.sshCommand` was written as `ssh -i <key>`, but `-i` only adds a key to
+  the ones ssh offers; agent keys are still offered first and GitHub accepts the
+  first that matches any account, so the persona was effectively decided by
+  agent order. Now written with `-o IdentitiesOnly=yes`.
+
+### Documentation
+
+- Requirements explain the HTTPS credential-helper dependency and how to check
+  it; "What a switch actually sets" now covers SSH and HTTPS auth separately.
+
 ## [1.0.2] - 2026-08-21
 
 ### Fixed

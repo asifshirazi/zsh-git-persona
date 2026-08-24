@@ -12,9 +12,11 @@ many as you have accounts.
 
 - [Why](#why)
 - [Installation](#installation)
+- [Updating](#updating)
 - [Commands](#commands)
   - [Adding a persona](#adding-a-persona)
   - [What a switch actually sets](#what-a-switch-actually-sets)
+  - [Commits waiting to be pushed](#commits-waiting-to-be-pushed)
 - [Where your personas live](#where-your-personas-live)
 - [Configuration](#configuration)
 - [Requirements](#requirements)
@@ -74,15 +76,6 @@ source /path/to/zsh-git-persona/git-persona.plugin.zsh
 
 Then `source ~/.zshrc` (or `exec zsh`) and run `git-add`.
 
-**Updating**
-
-```zsh
-git -C $ZSH_CUSTOM/plugins/git-persona pull && exec zsh
-```
-
-Pull rather than clone again. Cloning over an existing install fails with
-`destination path already exists`.
-
 ### Quick start
 
 A persona is built around an SSH key, so you need one per account in `~/.ssh`
@@ -99,6 +92,40 @@ git-who          # check which one is live
 The `-C` comment is where the commit email comes from. Add the matching `.pub`
 to that account under [Settings > SSH keys](https://github.com/settings/keys),
 and see [Requirements](#requirements) for the detail.
+
+## Updating
+
+```zsh
+git -C $ZSH_CUSTOM/plugins/git-persona pull && exec zsh
+```
+
+Pull rather than clone again. Cloning over an existing install fails with
+`destination path already exists and is not an empty directory`.
+
+With another plugin manager, use its own update command instead: `zinit update
+asifshirazi/zsh-git-persona`, `antidote update`, or `sheldon lock --update`.
+
+Your personas are not touched. They live in `~/.config/git-persona/`, outside
+the plugin directory, so updating and even reinstalling leaves them alone.
+
+Check what you are running with:
+
+```zsh
+print $GIT_ID_VERSION
+```
+
+**Coming from a version before 1.0.3, run this once:**
+
+```zsh
+gh auth setup-git
+```
+
+1.0.3 fixed a bug where any persona could clone and push to private repos its
+account had no access to, because HTTPS traffic was authenticating with a token
+cached by the system keychain rather than with the selected account. New
+personas get the fix automatically from `git-add`, but personas added earlier do
+not, so run the command above once per machine. `git-who` warns if it is still
+needed.
 
 ## Commands
 
@@ -122,6 +149,7 @@ else it works out for itself:
    keys in ~/.ssh  up/down, enter to pick
    > id_ed25519_work
      id_ed25519_personal
+     + generate a new key
 
    email from id_ed25519_work.pub: ada@acme.example
    short name, used as git-<name>: work
@@ -137,6 +165,15 @@ The commit email comes from the key's `.pub` comment, the display name from
 your GitHub profile, and the colours from a built-in palette. When it finishes
 it switches you straight into the new persona.
 
+**No key yet?** Pick `+ generate a new key`, or just run `git-add` with an empty
+`~/.ssh` and it goes there by itself. It makes an ed25519 pair with the
+account's address as the comment, copies the public half to your clipboard, and
+opens <https://github.com/settings/ssh/new> so you can paste it straight in. The
+key is also printed in case the clipboard gets clobbered on the way. Because the
+comment is set to the address you typed, the email step reads it back instead of
+asking twice. Existing files are never overwritten, and `ssh-keygen` asks for
+the passphrase itself.
+
 ### What a switch actually sets
 
 All global, so one command governs every repo on the machine:
@@ -144,12 +181,58 @@ All global, so one command governs every repo on the machine:
 | | |
 |---|---|
 | `user.name`, `user.email` | `~/.gitconfig` |
-| `core.sshCommand` | `~/.gitconfig` |
+| `core.sshCommand` (with `IdentitiesOnly=yes`) | `~/.gitconfig` |
 | Active `gh` account | `~/.config/gh/hosts.yml` |
+
+Both halves matter, because git authenticates two different ways:
+
+- **SSH remotes** use the key in `core.sshCommand`. `IdentitiesOnly=yes` is
+  included because `-i` alone only *adds* a key to the ones ssh offers, and
+  ssh-agent's keys are still offered first. GitHub accepts the first key that
+  matches any account, so without the flag the persona would be decided by
+  agent order.
+- **HTTPS remotes** use the credential helper, which is why `git-add` runs
+  `gh auth setup-git` once. See [Requirements](#requirements).
 
 It survives new shells and reboots. A repo with its own `user.email` still
 outranks the global one; `git-who` flags that and `git-id-locals --clear` fixes
 it.
+
+### Commits waiting to be pushed
+
+`git commit` never checks permissions. It writes to `.git/` on your own disk,
+with no server involved, so any repo will accept a commit under any identity.
+Permission exists only at push time. That leaves one way to end up with the
+wrong name on a commit: commit under one persona, switch, then push — by which
+point both halves agree again and nothing looks wrong.
+
+So a switch checks, and asks:
+
+```text
+   2 unpushed commits authored as old@example.com
+   re-author to New Name <new@example.com>? [y/N]
+```
+
+It is deliberately narrow:
+
+- **Unpushed only.** Commits reachable from `HEAD` but from no remote branch.
+  They have never left your machine, so nothing needs a force push and nobody's
+  clone breaks. Already-pushed commits are shared history and are left alone.
+- **Yours only.** Only commits authored by another of your personas. A
+  cherry-pick or a mailed patch from a colleague keeps its author.
+- **It refuses rather than half-finishing.** A dirty tree, a detached `HEAD`, a
+  rebase in progress, or a merge among the pending commits all stop it with an
+  explanation, having changed nothing.
+- **Never silent.** Rewriting commits changes their hashes, so it is always a
+  question. Say no and the readout reminds you the mismatch is still there.
+
+To fix a commit that is *already* pushed you have to rewrite shared history
+yourself, which is a decision worth making deliberately:
+
+```zsh
+git commit --amend --reset-author --author="Name <you@example.com>"
+git push --force-with-lease
+```
 
 ## Where your personas live
 
@@ -186,9 +269,25 @@ Set any of these in `~/.zshrc` **before** the plugin loads.
 ## Requirements
 
 - zsh, git, and the [GitHub CLI](https://cli.github.com) (`gh`)
+- **HTTPS auth routed through `gh`.** Switching personas moves `gh`'s active
+  account, but that only governs `git clone` and `git push` if git actually
+  asks `gh` for the password. It does not by default: git collects credential
+  helpers from every scope, and on macOS `/etc/gitconfig` ships
+  `helper = osxkeychain`, which answers first with whichever token it cached on
+  your very first push. That token belongs to one account permanently, so
+  **every persona would clone and push as that one account.**
+
+  `git-add` runs `gh auth setup-git` for you, and `git-who` warns if it is ever
+  undone. To check or fix it by hand:
+
+  ```zsh
+  git config --get-urlmatch credential.helper https://github.com   # want: gh
+  gh auth setup-git                                                # if not
+  ```
 - **An SSH key per account, in `~/.ssh`, each with its `.pub` beside it.** A
-  persona is built around a key, so `git-add` has nothing to offer without one.
-  The `.pub` is what the commit email is read from. Create one per account with:
+  persona is built around a key, and the `.pub` is what the commit email is read
+  from. You do not need to make them first: `git-add` offers
+  `+ generate a new key` and walks you through it. To do it by hand instead:
 
   ```zsh
   ssh-keygen -t ed25519 -C "you@example.com" -f ~/.ssh/id_ed25519_work
@@ -208,6 +307,12 @@ themselves off rather than failing:
 - **`~/.ssh/config` file mode** is preserved via `stat`, with a GNU fallback.
 
 ## Troubleshooting
+
+**A persona can clone or push to a repo its account has no access to.** HTTPS
+auth is not going through `gh`, so git is reusing a cached token from another
+account. Check with `git config --get-urlmatch credential.helper
+https://github.com`; if the answer is not `gh`, run `gh auth setup-git`.
+`git-who` reports this too.
 
 **`git-persona: no persona named 'x'`.** Run `git-switch` with no argument to
 see what exists, or `git-add` to create it.
@@ -229,11 +334,11 @@ The plugin is already installed. To update it, `git -C
 $ZSH_CUSTOM/plugins/git-persona pull`. To reinstall from scratch, remove the
 directory first with `rm -rf $ZSH_CUSTOM/plugins/git-persona`.
 
-**`git-add` shows no keys to pick from.** There are no private keys in `~/.ssh`.
-Keys are found by content rather than by filename, so anything without a
-`PRIVATE KEY` header is skipped. Generate one with `ssh-keygen`, as under
-[Requirements](#requirements), then run `git-add` again. You can also type a
-path at the prompt if your key lives elsewhere.
+**`git-add` shows no keys to pick from.** There are no private keys in `~/.ssh`,
+so it offers to generate one. Keys are found by content rather than by filename,
+so anything without a `PRIVATE KEY` header is skipped. If your key lives outside
+`~/.ssh`, turn the arrow menu off with `GIT_ID_MENU=numbers` and type its path
+at the prompt.
 
 **It asked for the email instead of reading it.** The key has no `.pub` beside
 it, or that file's comment is a hostname rather than an address, which is what
@@ -263,9 +368,9 @@ wrote stays in `~/.gitconfig`. Delete both by hand if you want them gone.
 
 ## Changelog
 
-Every release is listed in [CHANGELOG.md](CHANGELOG.md). Current version 1.0.2,
-which `git-who` and the plugin report as `$GIT_ID_VERSION` if you need it for a
-bug report.
+Every release is listed in [CHANGELOG.md](CHANGELOG.md). Current version 1.1.2.
+The plugin sets `$GIT_ID_VERSION`, so `print $GIT_ID_VERSION` gives you the
+number for a bug report.
 
 ## Licence
 
