@@ -135,7 +135,7 @@ needed.
 | `git-switch` | Pick a persona from an arrow-key list and switch to it. |
 | `git-<persona>` | Switch straight to that persona. Created for each one you add. |
 | `git-who` | Show the persona in force, and warn if its parts disagree. |
-| `git-remove` | Drop a persona, its `~/.ssh/config` alias, and its `gh` token. |
+| `git-remove` | Drop a persona, its `~/.ssh/config` alias, and its `gh` token. Key files are never deleted. |
 | `git-id-locals` | Find repos pinned to their own identity that ignore the global one. |
 | `git-id-locals --clear` | Unpin them, so they all follow the global identity. |
 | `git-id-icons` | Check whether your font has the glyphs. |
@@ -368,7 +368,7 @@ wrote stays in `~/.gitconfig`. Delete both by hand if you want them gone.
 
 ## Changelog
 
-Every release is listed in [CHANGELOG.md](CHANGELOG.md). Current version 1.1.2.
+Every release is listed in [CHANGELOG.md](CHANGELOG.md). Current version 1.1.3.
 The plugin sets `$GIT_ID_VERSION`, so `print $GIT_ID_VERSION` gives you the
 number for a bug report.
 

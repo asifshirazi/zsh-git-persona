@@ -39,7 +39,7 @@
 #  Both are reset on every source, so re-sourcing ~/.zshrc redefines the
 #  profiles rather than appending a second copy of each.
 # -----------------------------------------------------------------------------
-typeset -g GIT_ID_VERSION='1.1.2'
+typeset -g GIT_ID_VERSION='1.1.3'
 
 typeset -gA GIT_ID_FIELD=()
 typeset -ga GIT_ID_ORDER=()
@@ -1937,20 +1937,28 @@ git-remove() {
   # already declared in this scope makes zsh echo "p=<value>" into the middle
   # of the prompt, which is what used to leak out under the remove question.
   local ghacct=$(_gid_f $profile gh) profkey=$(_gid_f $profile key)
-  local dologout='' other=''
+  local dologout='' other='' ghshared=''
   if [[ -n $ghacct ]] && command -v gh &>/dev/null && _gid_gh_known $ghacct; then
     dologout=$ghacct
     # A gh account shared by another profile has to survive this, or removing
     # one profile would break the other's pushes.
     for other in $GIT_ID_ORDER; do
       [[ $other == $profile ]] && continue
-      [[ $(_gid_f $other gh) == $ghacct ]] && { dologout=''; break }
+      [[ $(_gid_f $other gh) == $ghacct ]] && { dologout=''; ghshared=$other; break }
     done
   fi
 
   local -a sshhosts=()
   [[ -n $profkey ]] && sshhosts=( ${(f)"$(_gid_ssh_hosts_for $profkey)"} )
   sshhosts=( ${sshhosts:#} )
+
+  # Removing the persona that is currently in force used to leave its name and
+  # email sitting in ~/.gitconfig, so the next commit was still authored by an
+  # account that no longer existed, pushed on whichever token gh promoted in
+  # its place. Worked out before the write, while the profile can still be read.
+  local profemail=$(_gid_f $profile email) islive=''
+  [[ -n $profemail && $(git config --global user.email) == $profemail ]] && islive=1
+  local -a rest=( ${GIT_ID_ORDER:#$profile} )
 
   print
   print -r -- "   ${HI}remove ${profile}${X} ${DIM}($(_gid_f $profile email))${X}"
@@ -1959,9 +1967,23 @@ git-remove() {
     "     ${DIM}·${X} ${sshhosts} from ${GIT_ID_SSH_CONFIG/#$HOME/~}"
   [[ -n $dologout ]] && print -r -- \
     "     ${DIM}·${X} gh token for ${dologout}"
-  [[ -n $ghacct && -z $dologout ]] && print -r -- \
-    "     ${DIM}·${X} ${DIM}gh token for ${ghacct} kept, another profile uses it${X}"
-  print -r -- "     ${DIM}·${X} ${DIM}ssh key files and ~/.gitconfig are never touched${X}"
+  # Two different reasons for not logging out, and saying the wrong one is
+  # worse than saying nothing: "another profile uses it" was printed even when
+  # the account had simply never been logged in.
+  [[ -n $ghshared ]] && print -r -- \
+    "     ${DIM}·${X} ${DIM}gh token for ${ghacct} kept, git-${ghshared} uses it too${X}"
+  [[ -n $ghacct && -z $dologout && -z $ghshared ]] && print -r -- \
+    "     ${DIM}·${X} ${DIM}no gh token for ${ghacct} to drop, it is not logged in${X}"
+  print -r -- "     ${DIM}·${X} ${DIM}ssh key files are never touched${X}"
+  if [[ -n $islive ]]; then
+    if (( ${#rest} )); then
+      print -r -- "     ${DIM}·${X} this is the persona in force, so ${HI}git-${rest[1]}${X}${DIM} takes over${X}"
+    else
+      print -r -- "     ${DIM}·${X} this is the last persona, so the identity in ~/.gitconfig is cleared"
+    fi
+  else
+    print -r -- "     ${DIM}·${X} ${DIM}~/.gitconfig is not touched, another persona is in force${X}"
+  fi
   print
 
   read -q "REPLY?   confirm? [y/N] " || {
@@ -2017,10 +2039,29 @@ git-remove() {
     fi
   fi
 
-  # ~/.gitconfig is left alone deliberately: it holds whatever identity was
-  # last switched to, which may well not be the one being removed, and
-  # rewriting it here would change who the next commit is authored by.
-  print -r -- "   ${DIM}run another git-<persona> to change the identity in ~/.gitconfig.${X}"
+  # ---- the identity left behind ----------------------------------------------
+  # Only when the removed persona was the live one. Any other case means
+  # ~/.gitconfig describes a persona that still exists, and rewriting it would
+  # change who the next commit is authored by for no reason.
+  if [[ -z $islive ]]; then
+    print
+    return 0
+  fi
+
+  if (( ${#rest} )); then
+    # A full switch rather than three git config writes, so gh moves too.
+    # Leaving gh where it is would swap one mismatch for another.
+    print -r -- "   ${DIM}that was the persona in force, switching to ${rest[1]}${X}"
+    _gid_switch $rest[1]
+    return 0
+  fi
+
+  # Nothing left to switch to. Clearing beats leaving a dead identity in place:
+  # git then asks who you are on the next commit, which is the honest answer.
+  git config --global --unset-all user.name       2>/dev/null
+  git config --global --unset-all user.email      2>/dev/null
+  git config --global --unset-all core.sshCommand 2>/dev/null
+  print -r -- "   ${OK}identity cleared${X}  ${DIM}no personas left, git will ask who you are${X}"
   print
 }
 

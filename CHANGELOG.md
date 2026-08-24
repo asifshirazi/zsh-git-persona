@@ -5,7 +5,7 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.2] - 2026-08-24
+## [1.1.3] - 2026-08-24
 
 ### Changed
 
@@ -20,6 +20,27 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   unreadable, unparseable, or a token supplied through `GH_TOKEN` /
   `GITHUB_TOKEN`, which gh honours over the file. A layout change upstream costs
   the speed, never correctness.
+
+### Fixed
+
+- **Removing the persona that was in force left its identity in `~/.gitconfig`.**
+  `git-remove` dropped the persona block, the `~/.ssh/config` alias and the gh
+  token, but never the name and email the persona had written globally. The next
+  commit was therefore authored as an account that no longer existed, and pushed
+  on whatever token gh promoted in its place — the exact mismatch this plugin
+  exists to prevent, reachable through the plugin's own command.
+
+  Now, when the removed persona is the live one: it switches to the first
+  remaining persona, moving gh with it rather than swapping one mismatch for
+  another. When it was the last persona, `user.name`, `user.email` and
+  `core.sshCommand` are cleared, so git asks who you are instead of signing as a
+  ghost. Removing a persona that is *not* in force still leaves `~/.gitconfig`
+  untouched. The confirmation says which of the three is about to happen.
+
+- **The removal confirmation could give the wrong reason for keeping a gh
+  token.** "kept, another profile uses it" was printed whenever the token was
+  not going to be dropped, including when the account had simply never been
+  logged in. The two cases now read differently.
 
 ### Added
 
