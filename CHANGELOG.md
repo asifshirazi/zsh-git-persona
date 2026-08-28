@@ -5,6 +5,33 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.4] - 2026-08-28
+
+### Added
+
+- **`git-persona-uninstall`.** One command to undo everything the plugin
+  created. A zsh plugin has no uninstall hook — removing its directory only
+  deletes the code — so the cleanup that ought to happen then has to be a
+  command you run first. It removes every persona's `~/.ssh/config` alias
+  (matched by `IdentityFile`), clears the identity from `~/.gitconfig` when the
+  one in force is one of its own, and deletes `~/.config/git-persona/`, dropping
+  the directory only when that leaves it empty so a custom
+  `GIT_ID_PROFILE_FILE` can never take its parent down with it. Deliberately
+  narrow, matching `git-remove`: it keeps your `gh` logins and never touches SSH
+  key files. It confirms first, listing exactly what will go, then prints the
+  line that removes the plugin itself.
+
+### Documentation
+
+- Trimmed the README to the parts people act on. Dropped the "Why" section, the
+  table of contents, the non-oh-my-zsh install notes, the pre-1.0.3 migration
+  step, the `$GIT_ID_VERSION` check, the "What a switch actually sets" table, the
+  Configuration table and the whole Troubleshooting section. Installation now
+  leads straight into Updating, then Commands.
+- Removed the manual `ssh-keygen` prerequisite from Quick start and
+  Requirements. `git-add` generates a key when you have none, so making one
+  first was never required.
+
 ## [1.1.3] - 2026-08-24
 
 ### Changed
@@ -187,6 +214,9 @@ First public release.
   themselves off rather than failing: copying the device code to the clipboard,
   and preserving the `~/.ssh/config` file mode.
 
+[1.1.4]: https://github.com/asifshirazi/zsh-git-persona/compare/v1.1.3...v1.1.4
+[1.1.3]: https://github.com/asifshirazi/zsh-git-persona/compare/v1.0.3...v1.1.3
+[1.0.3]: https://github.com/asifshirazi/zsh-git-persona/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/asifshirazi/zsh-git-persona/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/asifshirazi/zsh-git-persona/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/asifshirazi/zsh-git-persona/releases/tag/v1.0.0

@@ -6,6 +6,7 @@
 #  git-who                                      show the persona in play
 #  git-add                                      add an account, and switch to it
 #  git-remove                                   drop an account
+#  git-persona-uninstall                        remove everything it created
 #  git-id-locals                                find repos pinned to their own id
 #  git-id-locals --clear                        unpin them, so all follow global
 #  git-id-icons                                 check the Nerd Font glyphs
@@ -39,7 +40,7 @@
 #  Both are reset on every source, so re-sourcing ~/.zshrc redefines the
 #  profiles rather than appending a second copy of each.
 # -----------------------------------------------------------------------------
-typeset -g GIT_ID_VERSION='1.1.3'
+typeset -g GIT_ID_VERSION='1.1.4'
 
 typeset -gA GIT_ID_FIELD=()
 typeset -ga GIT_ID_ORDER=()
@@ -1239,7 +1240,7 @@ git-id-icons() {
   typeset -ga GIT_ID_PALETTE=( 208 45 141 114 210 117 213 156 173 220 )
 
 # Names that would collide with a command this file already defines.
-typeset -ga GIT_ID_RESERVED=( who add remove switch id-profile id-locals id-icons )
+typeset -ga GIT_ID_RESERVED=( who add remove switch persona-uninstall id-profile id-locals id-icons )
 
 # Print the profiles as a numbered list, each in its own accent, with a dot
 # against the one whose email matches the identity currently in force.
@@ -2062,6 +2063,122 @@ git-remove() {
   git config --global --unset-all user.email      2>/dev/null
   git config --global --unset-all core.sshCommand 2>/dev/null
   print -r -- "   ${OK}identity cleared${X}  ${DIM}no personas left, git will ask who you are${X}"
+  print
+}
+
+# -----------------------------------------------------------------------------
+#  git-persona-uninstall  ·  undo everything git-add created
+#
+#  A plugin has no uninstall hook. Removal is just rm -rf of its directory, and
+#  no plugin manager runs code on the way out, so the cleanup that ought to
+#  happen then has to be a command you run first. This undoes what git-add
+#  wrote, then prints the single line that deletes the plugin itself.
+#
+#  Deliberately narrow, matching git-remove's contract:
+#    - ssh key files are never touched
+#    - gh logins are left signed in; drop them with gh auth logout
+#    - ~/.gitconfig is cleared only when the identity in force is one of ours
+# -----------------------------------------------------------------------------
+git-persona-uninstall() {
+  emulate -L zsh
+  setopt local_options
+
+  local X=$'\e[0m' DIM=$'\e[38;5;243m' HI=$'\e[1;38;5;255m'
+  local OK=$'\e[38;5;108m' WARN=$'\e[38;5;179m'
+
+  [[ -o interactive && -t 0 ]] || {
+    print -u2 'git-persona-uninstall: needs an interactive terminal'
+    return 1
+  }
+
+  # Worked out before asking, so the prompt is the whole story. The live
+  # identity counts as ours only when its email matches a configured persona;
+  # anything else in ~/.gitconfig was set by hand and is left untouched.
+  local file=$GIT_ID_PROFILE_FILE dir=${GIT_ID_PROFILE_FILE:h}
+  local liveemail=$(git config --global user.email 2>/dev/null)
+  local islive='' p
+  for p in $GIT_ID_ORDER; do
+    [[ -n $liveemail && $(_gid_f $p email) == $liveemail ]] && { islive=1; break }
+  done
+
+  local pl=''; (( ${#GIT_ID_ORDER} == 1 )) || pl='s'
+
+  print
+  print -r -- "   ${HI}Uninstall git-persona${X}  ${DIM}ctrl-c to abort${X}"
+  print
+  print -r -- "   ${DIM}removes${X}"
+  (( ${#GIT_ID_ORDER} )) && print -r -- \
+    "     ${DIM}·${X} ${#GIT_ID_ORDER} persona${pl} and their ssh aliases in ${GIT_ID_SSH_CONFIG/#$HOME/~}"
+  print -r -- "     ${DIM}·${X} ${file:t} and its backup, and ${dir/#$HOME/~} if it is left empty"
+  [[ -n $islive ]] && print -r -- \
+    "     ${DIM}·${X} the identity in ~/.gitconfig ${DIM}(it is one of ours)${X}"
+  print -r -- "   ${DIM}keeps${X}"
+  print -r -- "     ${DIM}·${X} ${DIM}ssh key files, always${X}"
+  print -r -- "     ${DIM}·${X} ${DIM}gh logins — run gh auth logout to drop those${X}"
+  [[ -z $islive ]] && print -r -- \
+    "     ${DIM}·${X} ${DIM}~/.gitconfig, its identity is not one of ours${X}"
+  print
+
+  read -q "REPLY?   confirm? [y/N] " || {
+    print; print -r -- "   ${DIM}nothing removed${X}"; print; return 1
+  }
+  print
+
+  # ---- ssh aliases -----------------------------------------------------------
+  # Matched by IdentityFile, so hand-named aliases go too, exactly as git-remove
+  # does it, one persona at a time.
+  local -a allgone=() gone=()
+  local key=''
+  for p in $GIT_ID_ORDER; do
+    key=$(_gid_f $p key)
+    [[ -n $key ]] || continue
+    gone=( ${(f)"$(_gid_ssh_remove $key)"} )
+    allgone+=( ${gone:#} )
+  done
+  (( ${#allgone} )) && print -r -- \
+    "   ${OK}ssh aliases${X}  ${HI}${allgone}${X}  ${DIM}removed from ${GIT_ID_SSH_CONFIG/#$HOME/~}${X}"
+
+  # ---- gitconfig identity ----------------------------------------------------
+  if [[ -n $islive ]]; then
+    git config --global --unset-all user.name       2>/dev/null
+    git config --global --unset-all user.email      2>/dev/null
+    git config --global --unset-all core.sshCommand 2>/dev/null
+    print -r -- "   ${OK}identity cleared${X}  ${DIM}from ~/.gitconfig, git will ask who you are${X}"
+  fi
+
+  # ---- the data --------------------------------------------------------------
+  # The file and its backup by name, then the directory only if that left it
+  # empty. Never rm -rf the parent: a custom GIT_ID_PROFILE_FILE could point at
+  # $HOME, and rmdir refuses a non-empty directory, which is the safe failure.
+  if [[ -e $file || -e ${file}.bak ]]; then
+    rm -f -- $file ${file}.bak 2>/dev/null
+    print -r -- "   ${OK}removed${X}  ${HI}${file:t}${X}  ${DIM}and its backup${X}"
+  fi
+  if rmdir -- $dir 2>/dev/null; then
+    print -r -- "   ${OK}removed${X}  ${HI}${dir/#$HOME/~}${X}"
+  elif [[ -d $dir ]]; then
+    print -r -- "   ${DIM}kept ${dir/#$HOME/~}, it holds other files${X}"
+  fi
+
+  # ---- forget it in this shell -----------------------------------------------
+  # The functions and profiles live in memory until the shell restarts. Drop
+  # them so this session matches the disk we just cleared.
+  for p in $GIT_ID_ORDER; do unfunction git-$p 2>/dev/null; done
+  local k
+  for k in ${(k)GIT_ID_FIELD}; do unset "GIT_ID_FIELD[$k]"; done
+  GIT_ID_ORDER=()
+
+  # ---- the plugin itself -----------------------------------------------------
+  # Not deleted here: a sourced plugin cannot tell which manager installed it,
+  # and guessing wrong leaves a half-removed install. Print the line instead.
+  print
+  print -r -- "   ${DIM}data gone. remove the plugin with:${X}"
+  if [[ -n $ZSH_CUSTOM ]]; then
+    print -r -- "     ${HI}omz plugin disable git-persona; rm -rf \$ZSH_CUSTOM/plugins/git-persona${X}"
+  else
+    print -r -- "     ${HI}rm -rf <the git-persona directory>${X} ${DIM}and drop it from your plugin list${X}"
+  fi
+  print -r -- "   ${DIM}then start a new shell${X}"
   print
 }
 
