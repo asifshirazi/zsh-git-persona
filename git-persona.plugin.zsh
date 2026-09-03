@@ -40,7 +40,7 @@
 #  Both are reset on every source, so re-sourcing ~/.zshrc redefines the
 #  profiles rather than appending a second copy of each.
 # -----------------------------------------------------------------------------
-typeset -g GIT_ID_VERSION='1.1.5'
+typeset -g GIT_ID_VERSION='1.1.6'
 
 typeset -gA GIT_ID_FIELD=()
 typeset -ga GIT_ID_ORDER=()
@@ -1048,9 +1048,22 @@ _gid_ssh_add() {
 # ssh signing needs git 2.34. Below that `gpg.format=ssh` is rejected outright
 # and every commit fails, so the caller skips the whole thing rather than
 # leaving a machine that cannot commit.
+#
+# Matched by regex rather than by field position. `git --version` is not one
+# shape: homebrew prints "git version 2.55.0", but Apple's prints
+# "git version 2.39.5 (Apple Git-154)", so taking the last field yields
+# "Git-154)" there. That reached `local -i`, which evaluates its right-hand
+# side as arithmetic, and the stray paren was a hard error on every switch.
+# Taking the first N.M anywhere in the string is indifferent to whatever a
+# distribution appends.
 _gid_sign_supported() {
-  local v=${${(f)"$(git --version 2>/dev/null)"}##* }
-  local -i maj=${${v%%.*}:-0} min=${${${v#*.}%%.*}:-0}
+  emulate -L zsh
+  local raw=$(git --version 2>/dev/null)
+  # No version to read means no promise can be made, and the callers all treat
+  # a failure here as "leave signing alone", which is the safe direction.
+  [[ $raw =~ '([0-9]+)\.([0-9]+)' ]] || return 1
+  # Only ever digits by this point, so the arithmetic cannot be fed a word.
+  local -i maj=$match[1] min=$match[2]
   (( maj > 2 || (maj == 2 && min >= 34) ))
 }
 

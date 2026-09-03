@@ -5,6 +5,25 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.6] - 2026-09-03
+
+### Fixed
+
+- **`bad math expression: unexpected ')'` on every switch and add.** 1.1.5's git
+  version check read the last whitespace-separated field of `git --version`.
+  Homebrew prints `git version 2.55.0`, so that field is the version and it
+  worked. Apple's git prints `git version 2.39.5 (Apple Git-154)`, so the field
+  was `Git-154)`, which reached a `local -i` assignment and failed as
+  arithmetic. The version is now matched by regex anywhere in the string, so
+  whatever a distribution appends is ignored.
+
+  The visible error was the smaller half of it. The failed check also made the
+  switch clear signing and report "git is older than 2.34", which was wrong:
+  Apple git 2.39 supports SSH signing. Anyone on Xcode or Command Line Tools
+  git silently got no signed commits and a misleading reason for it. If you
+  updated to 1.1.5 and saw this, run `git-switch <persona>` once after
+  updating to write the signing config that was skipped.
+
 ## [1.1.5] - 2026-09-03
 
 ### Added
@@ -256,6 +275,7 @@ First public release.
   themselves off rather than failing: copying the device code to the clipboard,
   and preserving the `~/.ssh/config` file mode.
 
+[1.1.6]: https://github.com/asifshirazi/zsh-git-persona/compare/v1.1.5...v1.1.6
 [1.1.5]: https://github.com/asifshirazi/zsh-git-persona/compare/v1.1.4...v1.1.5
 [1.1.4]: https://github.com/asifshirazi/zsh-git-persona/compare/v1.1.3...v1.1.4
 [1.1.3]: https://github.com/asifshirazi/zsh-git-persona/compare/v1.0.3...v1.1.3
