@@ -40,7 +40,7 @@
 #  Both are reset on every source, so re-sourcing ~/.zshrc redefines the
 #  profiles rather than appending a second copy of each.
 # -----------------------------------------------------------------------------
-typeset -g GIT_ID_VERSION='1.1.4'
+typeset -g GIT_ID_VERSION='1.1.5'
 
 typeset -gA GIT_ID_FIELD=()
 typeset -ga GIT_ID_ORDER=()
@@ -182,6 +182,7 @@ if _gid_unicode; then
     mail   $'\uf0e0'                # email
     key    $'\uf084'                # ssh identity file
     auth   $'\uf023'                # gh account answering for https pushes
+    sign   $'\uf0c1'                # commit signing key
     scope  $'\uf2c1'                # where the identity is configured
     repo   $'\uf401'                # repository
     head   $'\ue0a0'                # branch
@@ -197,6 +198,7 @@ else
   typeset -gA GIT_ID_ICONS=(
     mark   '@'   name   '~'   mail   '@'
     key    '#'   auth   '%'   scope  '='
+    sign   '&'
     repo   '/'   head   '+'   warn   '!'
   )
   typeset -g GIT_ID_CAP_L=' '
@@ -345,7 +347,7 @@ _gid_render() {
 
   local title=$1 label=$2 name=$3 email=$4 key=$5 repo=$6 head=$7 note=$8
   local scope=$9 accent=${10:-$GIT_ID_NEUTRAL} shadow=${11:-$GIT_ID_SHADOW}
-  local gh=${12}
+  local gh=${12} sign=${13}
 
   local X=$'\e[0m'
   local A=$'\e[38;5;'"${accent}"'m'
@@ -436,6 +438,13 @@ _gid_render() {
   [[ -n $gh ]] && {
     _gid_sb+=( "$GIT_ID_SEG_BLUE" )
     _gid_st+=( " ${GIT_ID_ICONS[auth]}  gh: ${gh} " )
+  }
+  # Signing sits on the same row as key and gh because it is the same key
+  # answering a third question: not who opened the connection, but who the
+  # commit itself claims to be from.
+  [[ -n $sign ]] && {
+    _gid_sb+=( "$GIT_ID_SEG_CREAM" )
+    _gid_st+=( " ${GIT_ID_ICONS[sign]}  ${sign} " )
   }
   if [[ -n $repo ]]; then
     _gid_sb+=( "$GIT_ID_SEG_TAN" "$GIT_ID_SEG_CREAM" )
@@ -608,7 +617,11 @@ _gid_mode_of() {
 # script returns the child's exit status on macOS (verified: a child exiting 7
 # makes script exit 7), so a cancelled login is still reported as a failure.
 _gid_gh_login_run() {
-  local -a cmd=( gh auth login --hostname github.com --git-protocol https --web )
+  # admin:ssh_signing_key is not among gh's defaults, and asking for it here is
+  # the only cheap moment: adding it later means a second browser round-trip
+  # through `gh auth refresh`. gh adds it on top of its usual scopes.
+  local -a cmd=( gh auth login --hostname github.com --git-protocol https --web
+                 --scopes admin:ssh_signing_key )
 
   # Without a clipboard, or on a platform whose script(1) this does not know
   # how to drive, the login still has to work: fall through to running it
@@ -1022,6 +1035,126 @@ _gid_ssh_add() {
 }
 
 # -----------------------------------------------------------------------------
+#  Commit signing
+#
+#  An ssh key used for a push is an authentication key: it proves who opened
+#  the transport, and github discards that once the push lands. The Verified
+#  badge comes from a signature inside the commit object, which git writes only
+#  when told to. Same keypair either way, so nothing here generates a key; it
+#  points git at the public half and registers that half a second time, because
+#  github tracks authentication keys and signing keys as separate things.
+# -----------------------------------------------------------------------------
+
+# ssh signing needs git 2.34. Below that `gpg.format=ssh` is rejected outright
+# and every commit fails, so the caller skips the whole thing rather than
+# leaving a machine that cannot commit.
+_gid_sign_supported() {
+  local v=${${(f)"$(git --version 2>/dev/null)"}##* }
+  local -i maj=${${v%%.*}:-0} min=${${${v#*.}%%.*}:-0}
+  (( maj > 2 || (maj == 2 && min >= 34) ))
+}
+
+# The public half of $1, re-derived if it is missing. Pointing user.signingkey
+# at a file that does not exist breaks *every* commit on the machine, and a
+# private key alone is enough to recompute it, so this is a repair rather than
+# a reason to give up.
+_gid_pubkey() {
+  local key=${1/#\~/$HOME}
+  [[ -n $key ]] || return 1
+  [[ -r ${key}.pub ]] && { print -r -- "${key}.pub"; return 0 }
+  [[ -r $key ]] || return 1
+  ssh-keygen -y -f "$key" > "${key}.pub" 2>/dev/null || {
+    rm -f -- "${key}.pub" 2>/dev/null   # a half-written file is worse than none
+    return 1
+  }
+  chmod 644 "${key}.pub" 2>/dev/null
+  print -r -- "${key}.pub"
+}
+
+# Point git at $1 for signing, globally, alongside the identity the switch has
+# just written. Returns 1 with nothing written when it cannot be done safely,
+# so the caller can say why instead of the next commit failing with git's own
+# wording.
+_gid_sign_set() {
+  local key=$1
+  _gid_sign_supported || return 2
+
+  # Declared on its own line: `local pub=$(...)` returns local's status, not
+  # the substitution's, so the failure would be swallowed and signing switched
+  # on with an empty key, which stops commits outright.
+  local pub
+  pub=$(_gid_pubkey "$key") || return 3
+  [[ -n $pub ]] || return 3
+
+  git config --global gpg.format      ssh
+  git config --global user.signingkey "$pub"
+  git config --global commit.gpgsign  true
+  git config --global tag.gpgsign     true
+}
+
+# Undo the above. Takes the scope so the per-repo cleanups can reuse it, and
+# runs everywhere the identity itself is cleared: commit.gpgsign left behind
+# without a signingkey is the one state that stops commits altogether, so this
+# half matters more than setting it did.
+_gid_sign_clear() {
+  local -a where=( ${@:---global} )
+  git config $where --unset-all commit.gpgsign  2>/dev/null
+  git config $where --unset-all tag.gpgsign     2>/dev/null
+  git config $where --unset-all user.signingkey 2>/dev/null
+  git config $where --unset-all gpg.format      2>/dev/null
+  return 0
+}
+
+# True when the account gh is currently acting as already lists $1 as a signing
+# key. Compares the key material, field 2, because titles are free text and the
+# same key uploaded twice carries two different ones.
+_gid_sign_registered() {
+  local pub=$1
+  command -v gh &>/dev/null || return 1
+  local material=${${=$(<$pub)}[2]}
+  [[ -n $material ]] || return 1
+  gh api /user/ssh_signing_keys --jq '.[].key' 2>/dev/null \
+    | grep -qF -- "$material"
+}
+
+# Register the public half as a signing key. Best effort throughout: a failure
+# here costs the badge, never the key or the persona, so it warns and returns
+# rather than aborting whatever called it.
+_gid_sign_upload() {
+  local pub=$1 title=$2
+  local X=$'\e[0m' OK=$'\e[38;5;108m' WARN=$'\e[38;5;179m'
+  local DIM=$'\e[38;5;243m' HI=$'\e[1;38;5;255m'
+
+  command -v gh &>/dev/null || {
+    print -r -- "   ${DIM}add it as a Signing Key too: https://github.com/settings/ssh/new${X}" >&2
+    return 1
+  }
+
+  if _gid_sign_registered "$pub"; then
+    print -r -- "   ${OK}signing key${X}  ${DIM}already registered on github${X}" >&2
+    return 0
+  fi
+
+  # Uploading needs a scope that gh does not request by default, so an older
+  # login has a token that cannot do this. Ask for it rather than reporting the
+  # 404 github answers with when the scope is missing.
+  if ! gh auth status 2>&1 | grep -q 'admin:ssh_signing_key'; then
+    print -r -- "   ${WARN}gh cannot upload signing keys with its current scopes${X}" >&2
+    print -r -- "   ${DIM}run: gh auth refresh -h github.com -s admin:ssh_signing_key${X}" >&2
+    return 1
+  fi
+
+  if gh ssh-key add "$pub" --type signing --title "$title" >/dev/null 2>&1; then
+    print -r -- "   ${OK}signing key${X}  ${DIM}registered on github as ${HI}${title}${X}" >&2
+    return 0
+  fi
+
+  print -r -- "   ${WARN}could not register the signing key${X}" >&2
+  print -r -- "   ${DIM}add it by hand at https://github.com/settings/ssh/new, type: Signing Key${X}" >&2
+  return 1
+}
+
+# -----------------------------------------------------------------------------
 #  Switch
 # -----------------------------------------------------------------------------
 _gid_switch() {
@@ -1056,6 +1189,19 @@ _gid_switch() {
   # persona would be decided by agent order rather than by this line. The flag
   # goes after -i, which git-who's parser relies on.
   git config --global core.sshCommand "ssh -i ${key/#\~/$HOME} -o IdentitiesOnly=yes"
+
+  # The same key, now also answering for the commit itself. Cleared rather than
+  # left half-set on any failure: commit.gpgsign pointing at a key git cannot
+  # read stops every commit on the machine, which is far worse than an unsigned
+  # one, so each failure path says what happened and leaves signing off.
+  _gid_sign_set "$key"
+  case $? in
+    0) ;;
+    2) _gid_sign_clear
+       _gid_notes+=( 'git is older than 2.34, so commits cannot be ssh-signed and will not show as Verified' ) ;;
+    3) _gid_sign_clear
+       _gid_notes+=( "no public half for ${key} and it could not be derived, so commits are not signed" ) ;;
+  esac
 
   # The env var beats core.sshCommand, and being per-shell it is the one thing
   # that could answer differently in two tabs. Clearing it lets the global
@@ -1100,20 +1246,24 @@ _gid_switch() {
   # identity. That is the drift being fixed, so clear it on sight.
   local _gid_repo _gid_head
   if _gid_probe; then
-    if [[ -n $(git config --local --get-regexp '^(user\.(name|email)|core\.sshcommand)$' 2>/dev/null) ]]; then
+    if [[ -n $(git config --local --get-regexp '^(user\.(name|email|signingkey)|core\.sshcommand|commit\.gpgsign|tag\.gpgsign|gpg\.format)$' 2>/dev/null) ]]; then
       git config --local --unset-all user.name       2>/dev/null
       git config --local --unset-all user.email      2>/dev/null
       git config --local --unset-all core.sshCommand 2>/dev/null
+      _gid_sign_clear --local
       _gid_notes+=(
         "cleared a per-repo identity in ${_gid_repo} that would have overridden this"
       )
     fi
   fi
 
+  local _gid_sign=$(git config --global user.signingkey 2>/dev/null)
+  [[ -n $_gid_sign ]] && _gid_sign="signing: ${_gid_sign:t}" || _gid_sign='unsigned'
+
   _gid_render 'PERSONA SWITCHED' "$profile" \
               "$name" "$email" "$key" "$_gid_repo" "$_gid_head" \
               "${(F)_gid_notes}" 'global, applies everywhere' \
-              "$accent" "$shadow" "$_gid_gh"
+              "$accent" "$shadow" "$_gid_gh" "$_gid_sign"
 }
 
 # One git-<name> command per profile, defined from whatever the data file
@@ -1184,6 +1334,7 @@ git-id-locals() {
         git -C "$repo" config --local --unset-all user.name       2>/dev/null
         git -C "$repo" config --local --unset-all user.email      2>/dev/null
         git -C "$repo" config --local --unset-all core.sshCommand 2>/dev/null
+        ( cd "$repo" && _gid_sign_clear --local )
         print -r -- "   ${OK}cleared${X}  ${repo/#$HOME/~}  ${DIM}was ${email}${X}"
       else
         print -r -- "   ${WARN}pinned${X}   ${repo/#$HOME/~}  ${DIM}${email}${X}"
@@ -1744,6 +1895,18 @@ git-add() {
     fi
   fi
 
+  # ---- register the key for signing ------------------------------------------
+  # After the login, because it has to land on the account being added rather
+  # than on whichever one happened to be active. Same key as the one above, a
+  # second registration: github keeps authentication keys and signing keys in
+  # separate lists, and only the signing list produces the Verified badge.
+  local signpub=$(_gid_pubkey "$key")
+  if [[ -n $signpub ]]; then
+    _gid_sign_upload "$signpub" "${profile} (signing)"
+  else
+    print -r -- "   ${WARN}no public half for ${key}, so commits cannot be signed${X}"
+  fi
+
   # Signing in as an account another profile already owns would give two
   # commands the same token and quietly diverge them, so say so now.
   local other
@@ -2062,6 +2225,7 @@ git-remove() {
   git config --global --unset-all user.name       2>/dev/null
   git config --global --unset-all user.email      2>/dev/null
   git config --global --unset-all core.sshCommand 2>/dev/null
+  _gid_sign_clear
   print -r -- "   ${OK}identity cleared${X}  ${DIM}no personas left, git will ask who you are${X}"
   print
 }
@@ -2143,6 +2307,7 @@ git-persona-uninstall() {
     git config --global --unset-all user.name       2>/dev/null
     git config --global --unset-all user.email      2>/dev/null
     git config --global --unset-all core.sshCommand 2>/dev/null
+    _gid_sign_clear
     print -r -- "   ${OK}identity cleared${X}  ${DIM}from ~/.gitconfig, git will ask who you are${X}"
   fi
 
@@ -2251,6 +2416,36 @@ git-who() {
     _gid_notes+=( 'no user.name or user.email is configured' )
   fi
 
+  # Signing state, reported next to the key because the two are set together
+  # and come apart quietly. Three things have to line up for a Verified badge
+  # and only the last is visible from here, so the notes name whichever is
+  # missing rather than leaving an unsigned commit to be discovered on github.
+  local sign='' signkey=$(git config user.signingkey 2>/dev/null)
+  local signon=$(git config --type=bool commit.gpgsign 2>/dev/null)
+  local signfmt=$(git config gpg.format 2>/dev/null)
+
+  if [[ $signon == true && -n $signkey ]]; then
+    sign="signing: ${${signkey/#$HOME/\~}:t}"
+    # The one state that breaks every commit rather than just leaving it
+    # unsigned, so it is a warning and not a quiet dash.
+    [[ -r ${signkey/#\~/$HOME} ]] || _gid_notes+=(
+      "user.signingkey points at ${signkey}, which cannot be read, so every commit will fail"
+    )
+    [[ $signfmt == ssh ]] || _gid_notes+=(
+      "commit.gpgsign is on but gpg.format is ${signfmt:-gpg}, not ssh, so the ssh key above is not what signs"
+    )
+  elif [[ $signon == true ]]; then
+    sign='signing: no key'
+    _gid_notes+=(
+      'commit.gpgsign is on with no user.signingkey, so every commit will fail. run: git-switch <persona>'
+    )
+  else
+    sign='unsigned'
+    _gid_notes+=(
+      'commits are not signed, so they will not show as Verified on github. run: git-switch <persona>'
+    )
+  fi
+
   # What a push would actually authenticate as. The whole point of showing it
   # next to the email: these two are set independently and drift apart quietly,
   # so a mismatch is worth saying out loud rather than leaving to be inferred.
@@ -2273,5 +2468,5 @@ git-who() {
 
   _gid_render 'CURRENT PERSONA' "$label" \
               "$name" "$email" "$key" "$_gid_repo" "$_gid_head" \
-              "${(F)_gid_notes}" "$scope" "$accent" "$shadow" "$gh"
+              "${(F)_gid_notes}" "$scope" "$accent" "$shadow" "$gh" "$sign"
 }

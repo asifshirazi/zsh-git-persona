@@ -101,6 +101,38 @@ git commit --amend --reset-author --author="Name <you@example.com>"
 git push --force-with-lease
 ```
 
+## Verified commits
+
+The **Verified** badge on GitHub has nothing to do with pushing over SSH. Your
+key there is an *authentication* key: it proves who opened the connection, and
+GitHub discards that fact once the push lands. The badge comes from a signature
+stored inside the commit itself.
+
+Three things have to line up, and `git-persona` now handles all three:
+
+1. The commit email is a verified address on the account.
+2. The commit carries a signature. A switch sets `gpg.format=ssh`,
+   `user.signingkey`, `commit.gpgsign` and `tag.gpgsign` for you.
+3. The public key is registered on the account **as a signing key** — a
+   separate registration from the authentication key, even though it is the
+   same key. `git-add` uploads it twice.
+
+`git-who` shows the signing state next to the key and warns when it is off.
+
+**Already have personas?** Nothing to regenerate — signing reuses the key each
+persona already has. Once per persona:
+
+```zsh
+gh ssh-key add ~/.ssh/<key>.pub --type signing   # the second registration
+git-switch <persona>                             # writes the signing config
+```
+
+If `gh` refuses the upload, its token predates the scope:
+`gh auth refresh -h github.com -s admin:ssh_signing_key`.
+
+Commits made before this stay unsigned. Re-signing history means rewriting it,
+which changes every SHA, so it is not worth doing on anything already pushed.
+
 ## Where your personas live
 
 In `~/.config/git-persona/profiles.zsh`, never in the plugin. One readable
@@ -121,7 +153,9 @@ nothing.
 
 ## Requirements
 
-- zsh, git, and the [GitHub CLI](https://cli.github.com) (`gh`)
+- zsh, git, and the [GitHub CLI](https://cli.github.com) (`gh`). Signed commits
+  need git 2.34 or newer; on anything older the signing config is skipped and
+  everything else works as before.
 - **HTTPS auth routed through `gh`.** Switching personas moves `gh`'s active
   account, but that only governs `git clone` and `git push` if git actually
   asks `gh` for the password. It does not by default: git collects credential

@@ -5,6 +5,48 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.5] - 2026-09-03
+
+### Added
+
+- **Verified commits.** An SSH key used for a push is an *authentication* key:
+  it proves who opened the transport, and GitHub discards that once the push
+  lands. The Verified badge comes from a signature stored inside the commit
+  object, which git writes only when told to. Switching a persona now points
+  git at that persona's key for signing as well (`gpg.format=ssh`,
+  `user.signingkey`, `commit.gpgsign`, `tag.gpgsign`), so the key that opens
+  the connection is also the one that vouches for the commit.
+- **`git-add` registers the signing key.** GitHub keeps authentication keys and
+  signing keys in two separate lists, and only the second produces the badge,
+  so the same public key is now uploaded twice. The login asks for the
+  `admin:ssh_signing_key` scope up front to avoid a second browser round-trip.
+- **`git-who` reports signing.** A new segment next to the key and the `gh`
+  account, plus a warning for each way this comes apart: signing off entirely,
+  `commit.gpgsign` on with no key, a `signingkey` that cannot be read, or
+  `gpg.format` set to something other than `ssh`.
+
+### Fixed
+
+- Every path that clears an identity now clears the signing config with it —
+  `git-remove` when the last persona goes, `git-persona-uninstall`,
+  `git-id-locals --clear`, and the per-repo override a switch wipes. A stray
+  `commit.gpgsign=true` with no `user.signingkey` does not merely leave commits
+  unsigned, it stops commits altogether, so this half matters more than setting
+  it did.
+
+### Notes for existing users
+
+No key regeneration. Signing reuses the keypair each persona already has. Two
+one-time steps per persona: register its existing public key on GitHub as a
+*signing* key (`gh ssh-key add ~/.ssh/<key>.pub --type signing`), and run
+`git-switch <persona>` once so the new config is written. Commits made before
+this stay unsigned; only new ones get the badge.
+
+A persona whose `.pub` file is missing has it re-derived from the private key
+(`ssh-keygen -y`) rather than being left with a `signingkey` git cannot read.
+On git older than 2.34, which does not support SSH signing, the signing config
+is skipped with a note instead of breaking every commit.
+
 ## [1.1.4] - 2026-08-28
 
 ### Added
@@ -214,6 +256,7 @@ First public release.
   themselves off rather than failing: copying the device code to the clipboard,
   and preserving the `~/.ssh/config` file mode.
 
+[1.1.5]: https://github.com/asifshirazi/zsh-git-persona/compare/v1.1.4...v1.1.5
 [1.1.4]: https://github.com/asifshirazi/zsh-git-persona/compare/v1.1.3...v1.1.4
 [1.1.3]: https://github.com/asifshirazi/zsh-git-persona/compare/v1.0.3...v1.1.3
 [1.0.3]: https://github.com/asifshirazi/zsh-git-persona/compare/v1.0.2...v1.0.3
